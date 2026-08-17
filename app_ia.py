@@ -1,5 +1,4 @@
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+import streamlit as st
 import json
 import os
 import random
