@@ -4,15 +4,16 @@ import os
 import random
 import math
 from PIL import Image
+import pytesseract  # Librería para LEER texto dentro de imágenes (OCR)
 
-# Archivos de memoria en disco (JSON)
-MEMORIA_TEXTO_FILE = "memoria_texto.json"
+# Archivos de memoria
+MEMORIA_CREENCIAS_FILE = "memoria_creencias.json"
 MEMORIA_REFUERZO_FILE = "memoria_refuerzo.json"
 MEMORIA_IMAGENES_FILE = "memoria_imagenes.json"
 
-class IACompleta:
+class IARazonable:
     def __init__(self):
-        self.memoria_texto = self.cargar_json(MEMORIA_TEXTO_FILE)
+        self.creencias = self.cargar_json(MEMORIA_CREENCIAS_FILE)
         self.tabla_q = self.cargar_json(MEMORIA_REFUERZO_FILE)
         self.memoria_imagenes = self.cargar_json(MEMORIA_IMAGENES_FILE)
         self.tasa_aprendizaje = 0.5
@@ -27,86 +28,68 @@ class IACompleta:
         return {}
 
     def guardar_memoria(self):
-        with open(MEMORIA_TEXTO_FILE, "w", encoding="utf-8") as f:
-            json.dump(self.memoria_texto, f, indent=4, ensure_ascii=False)
+        with open(MEMORIA_CREENCIAS_FILE, "w", encoding="utf-8") as f:
+            json.dump(self.creencias, f, indent=4, ensure_ascii=False)
         with open(MEMORIA_REFUERZO_FILE, "w", encoding="utf-8") as f:
             json.dump(self.tabla_q, f, indent=4, ensure_ascii=False)
         with open(MEMORIA_IMAGENES_FILE, "w", encoding="utf-8") as f:
             json.dump(self.memoria_imagenes, f, indent=4, ensure_ascii=False)
 
-    # --- ENSEÑAR, APLICAR Y BORRAR TEXTO ---
-    def aprender_texto(self, palabra, definicion):
-        p_clean = palabra.strip().lower()
+    # --- 1. RAZONAMIENTO Y CREENCIA PROPIA ---
+    def evaluar_y_aprender(self, concepto, definicion):
+        """La IA evalúa la información antes de decidir si cree en ella."""
+        c_clean = concepto.strip().lower()
         d_clean = definicion.strip().lower()
-        self.memoria_texto[p_clean] = d_clean
-        self.guardar_memoria()
 
-    def borrar_texto(self, palabra):
-        p_clean = palabra.strip().lower()
-        if p_clean in self.memoria_texto:
-            del self.memoria_texto[p_clean]
+        if c_clean in self.creencias:
+            datos_previos = self.creencias[c_clean]
+            # Si la definición coincide con lo que ya comprobó antes, aumenta su certeza
+            if datos_previos["definicion"] == d_clean:
+                datos_previos["comprobaciones"] += 1
+                datos_previos["certeza"] = min(100, datos_previos["certeza"] + 15)
+                self.guardar_memoria()
+                return f"🧠 **La IA dice:** 'Ya he comprobado esto {datos_previos['comprobaciones']} veces. Estoy {datos_previos['certeza']}% segura de que **{c_clean}** es {d_clean}'."
+            else:
+                # Si le dices algo distinto a lo que sabe, duda
+                return f"🤔 **La IA duda:** 'Tú me dices que **{c_clean}** es *{d_clean}*, pero según mis comprobaciones previas creo que es *{datos_previos['definicion']}* (Certeza: {datos_previos['certeza']}%). Necesito más pruebas.'"
+        else:
+            # Nuevo dato: empieza con una certeza inicial baja (40%) porque aún no lo ha comprobado sola
+            self.creencias[c_clean] = {
+                "definicion": d_clean,
+                "certeza": 40,
+                "comprobaciones": 1
+            }
             self.guardar_memoria()
-            return True
-        return False
+            return f"📝 **La IA registra la hipótesis:** 'Guardé que **{c_clean}** podría ser *{d_clean}*. Mi certeza actual es del 40% hasta que lo compruebe en el entorno.'"
 
-    def aplicar_texto(self, entrada):
-        texto_clean = entrada.strip().lower()
-        palabras = texto_clean.split()
-        
-        respuestas_directas = []
+    def razonar_respuesta(self, mensaje):
+        """Responde basándose ÚNICAMENTE en lo que ella cree y ha verificado."""
+        palabras = mensaje.lower().split()
+        respuestas = []
+
         for p in palabras:
-            p_sub = p.strip(",.?!")
-            if p_sub in self.memoria_texto:
-                respuestas_directas.append(f"Entiendo que **'{p_sub}'** significa *{self.memoria_texto[p_sub]}*.")
+            p_clean = p.strip(",.?!")
+            if p_clean in self.creencias:
+                info = self.creencias[p_clean]
+                if info["certeza"] >= 70:
+                    respuestas.append(f"• Sé con alta certeza ({info['certeza']}%) que **'{p_clean}'** es *{info['definicion']}*.")
+                else:
+                    respuestas.append(f"• Tengo la hipótesis ({info['certeza']}% de certeza) de que **'{p_clean}'** podría ser *{info['definicion']}*.")
 
-        if respuestas_directas:
-            return "💡 **Aplicando lo aprendido:**\n\n" + "\n".join(respuestas_directas)
-        return "🤔 No conozco esas palabras. ¡Enséñamela escribiendo: *palabra es definición*!"
+        if respuestas:
+            return "💡 **Conclusiones propias de la IA basadas en su memoria:**\n\n" + "\n".join(respuestas)
+        return "🤷 **La IA dice:** 'No tengo conocimientos ni comprobaciones previas sobre las palabras de tu mensaje.'"
 
-    # --- PROCESAMIENTO, APLICACIÓN Y BORRAR IMÁGENES ---
-    def extraer_patron(self, img_pil):
-        img = img_pil.convert('RGB').resize((50, 50))
-        pixels = list(img.getdata())
-        r_total = sum(p[0] for p in pixels) / len(pixels) / 255.0
-        g_total = sum(p[1] for p in pixels) / len(pixels) / 255.0
-        b_total = sum(p[2] for p in pixels) / len(pixels) / 255.0
-        return {"rojo": round(r_total, 3), "verde": round(g_total, 3), "azul": round(b_total, 3)}
+    # --- 2. LECTURA DE TEXTO EN FOTOS (OCR) ---
+    def leer_texto_de_imagen(self, img_pil):
+        """Extrae el texto escrito dentro de una foto usando Tesseract OCR."""
+        try:
+            texto_extraido = pytesseract.image_to_string(img_pil, lang='spa+eng')
+            return texto_extraido.strip()
+        except Exception as e:
+            return f"Error al procesar la imagen con OCR: {e}. Asegúrate de tener Tesseract instalado."
 
-    def aprender_imagen(self, etiqueta, img_pil):
-        patron = self.extraer_patron(img_pil)
-        self.memoria_imagenes[etiqueta.strip().lower()] = patron
-        self.guardar_memoria()
-        return patron
-
-    def borrar_imagen(self, etiqueta):
-        e_clean = etiqueta.strip().lower()
-        if e_clean in self.memoria_imagenes:
-            del self.memoria_imagenes[e_clean]
-            self.guardar_memoria()
-            return True
-        return False
-
-    def clasificar_imagen(self, img_pil):
-        if not self.memoria_imagenes:
-            return None, 0.0
-
-        patron_nuevo = self.extraer_patron(img_pil)
-        mejor_etiqueta, menor_distancia = None, float('inf')
-
-        for etiqueta, patron_guardado in self.memoria_imagenes.items():
-            distancia = math.sqrt(
-                (patron_nuevo["rojo"] - patron_guardado["rojo"]) ** 2 +
-                (patron_nuevo["verde"] - patron_guardado["verde"]) ** 2 +
-                (patron_nuevo["azul"] - patron_guardado["azul"]) ** 2
-            )
-            if distancia < menor_distancia:
-                menor_distancia = distancia
-                mejor_etiqueta = etiqueta
-
-        confianza = max(0.0, round((1.0 - menor_distancia) * 100, 1))
-        return mejor_etiqueta, confianza
-
-    # --- REFUERZO ---
+    # --- 3. REFUERZO ---
     def seleccionar_accion(self, estado):
         if estado not in self.tabla_q:
             self.tabla_q[estado] = {"Acción A": 0.0, "Acción B": 0.0, "Acción C": 0.0}
@@ -123,121 +106,79 @@ class IACompleta:
         self.tabla_q[estado][accion] = round(nuevo_val, 4)
         self.guardar_memoria()
 
-    def resetear_memoria_completa(self):
-        self.memoria_texto = {}
-        self.memoria_imagenes = {}
-        self.tabla_q = {}
-        self.guardar_memoria()
-
-# --- CONFIGURACIÓN E INTERFAZ WEB STREAMLIT ---
-st.set_page_config(page_title="IA con Aprendizaje Activo", page_icon="🤖", layout="centered")
+# --- INTERFAZ EN STREAMLIT ---
+st.set_page_config(page_title="IA con Razonamiento Propio y OCR", page_icon="🧠", layout="centered")
 
 if "ia" not in st.session_state:
-    st.session_state.ia = IACompleta()
+    st.session_state.ia = IARazonable()
 
 ia = st.session_state.ia
 
-st.title("🤖 IA con Aprendizaje y Gestión de Memoria")
+st.title("🧠 IA con Criterio Propio y Lectura de Fotos")
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "💬 Chat", 
-    "🖼️ Enseñar Imagen", 
-    "🔍 Reconocer Imagen", 
-    "🎯 Ensayo y Error",
-    "🗑️ Borrar / Corregir"
+tab1, tab2, tab3 = st.tabs([
+    "💬 Chat / Criterio Propio", 
+    "📄 Leer Texto de Foto (OCR)", 
+    "🎯 Ensayo y Error"
 ])
 
-# --- TAB 1: CHAT ---
+# --- TAB 1: CHAT Y CRITERIO PROPIO ---
 with tab1:
-    st.subheader("Conversa o enseña texto")
-    st.info("💡 Para enseñar escribe: `palabra es definición` (Ej: `hola es un saludo`)")
-    mensaje = st.text_input("Escribe tu mensaje:", key="input_chat")
+    st.subheader("Conversa o propone hipótesis a la IA")
+    st.info("💡 Si le enseñas algo (`concepto es definición`), la IA evaluará su nivel de certeza en lugar de repetirlo a ciegas.")
+
+    mensaje = st.text_input("Escribe tu mensaje o enseñanza:", key="input_chat")
     if st.button("Enviar", type="primary"):
         if mensaje.strip():
             if " es " in mensaje.lower():
                 partes = mensaje.lower().split(" es ", 1)
-                ia.aprender_texto(partes[0].strip(), partes[1].strip())
-                st.success(f"¡Concepto aprendido! Guardé: **'{partes[0].strip()}'** = **{partes[1].strip()}**.")
+                res = ia.evaluar_y_aprender(partes[0].strip(), partes[1].strip())
+                st.write(res)
             else:
-                respuesta = ia.aplicar_texto(mensaje)
+                respuesta = ia.razonar_respuesta(mensaje)
                 st.write(respuesta)
 
     st.markdown("---")
-    with st.expander("📖 Ver memoria de texto aprendida"):
-        st.json(ia.memoria_texto)
+    with st.expander("📖 Ver sistema de creencias y certeza de la IA"):
+        st.json(ia.creencias)
 
-# --- TAB 2: ENSEÑAR IMAGEN ---
+# --- TAB 2: LECTURA DE FOTOS (OCR) ---
 with tab2:
-    st.subheader("1. Entrenar a la IA con una foto")
-    archivo_entrenar = st.file_uploader("Sube una foto:", type=["png", "jpg", "jpeg"], key="uploader_teach")
-    if archivo_entrenar is not None:
-        img = Image.open(archivo_entrenar)
-        st.image(img, width=200)
-        nombre_concepto = st.text_input("¿Qué representa esta imagen? (Ej: gota_de_agua):")
-        if st.button("Guardar Imagen en Memoria"):
-            if nombre_concepto.strip():
-                patron = ia.aprender_imagen(nombre_concepto, img)
-                st.success(f"¡Registrado '{nombre_concepto}'!")
+    st.subheader("Extraer y leer texto desde una foto")
+    archivo_foto = st.file_uploader("Sube la foto de un documento, cartel o libro:", type=["png", "jpg", "jpeg"])
+    
+    if archivo_foto is not None:
+        img = Image.open(archivo_foto)
+        st.image(img, width=300, caption="Foto cargada")
+        
+        if st.button("📖 Leer texto de la imagen", type="primary"):
+            texto_detectado = ia.leer_texto_de_imagen(img)
+            if texto_detectado:
+                st.success("¡Texto detectado con éxito!")
+                st.text_area("Resultado de la lectura:", value=texto_detectado, height=150)
+                
+                # Opción para que la IA procese lo que acaba de leer
+                if st.button("🧠 Hacer que la IA analice este texto"):
+                    res = ia.razonar_respuesta(texto_detectado)
+                    st.write(res)
             else:
-                st.warning("Escribe el nombre del concepto.")
+                st.warning("No se detectó texto claro en la imagen.")
 
-# --- TAB 3: RECONOCER IMAGEN ---
+# --- TAB 3: REFUERZO ---
 with tab3:
-    st.subheader("2. Probar el reconocimiento visual")
-    archivo_test = st.file_uploader("Sube una imagen para clasificar:", type=["png", "jpg", "jpeg"], key="uploader_test")
-    if archivo_test is not None:
-        img_test = Image.open(archivo_test)
-        st.image(img_test, width=200)
-        if st.button("¿Qué imagen es esta?", type="primary"):
-            prediccion, confianza = ia.clasificar_imagen(img_test)
-            if prediccion:
-                st.balloons()
-                st.success(f"¡La IA reconoce esta imagen como: **{prediccion.upper()}** ({confianza}% de coincidencia)!")
-            else:
-                st.error("La memoria de imágenes está vacía. ¡Primero enséñale una imagen!")
-
-# --- TAB 4: REFUERZO ---
-with tab4:
-    st.subheader("Entrenamiento por Refuerzo (Ensayo y Error)")
-    estado_input = st.text_input("Estado actual:", value="Alguien te dice Hola")
+    st.subheader("Entrenamiento por Refuerzo")
+    estado_input = st.text_input("Estado actual:", value="Situación desconocida")
     if st.button("¿Qué hace la IA?"):
         st.session_state.accion_elegida = ia.seleccionar_accion(estado_input)
 
     if "accion_elegida" in st.session_state:
-        st.markdown(f"### Acción elegida: **{st.session_state.accion_elegida}**")
+        st.write(f"### Acción elegida: **{st.session_state.accion_elegida}**")
         col1, col2 = st.columns(2)
         with col1:
             if st.button("👍 Premio (+10)", use_container_width=True):
                 ia.aprender_refuerzo(estado_input, st.session_state.accion_elegida, 10)
-                st.success("¡Premio guardado!")
+                st.success("¡Acción respaldada con premio!")
         with col2:
             if st.button("👎 Castigo (-10)", use_container_width=True):
                 ia.aprender_refuerzo(estado_input, st.session_state.accion_elegida, -10)
-                st.error("¡Castigo guardado!")
-
-# --- TAB 5: BORRAR / CORREGIR ---
-with tab5:
-    st.subheader("Administrar y Borrar Memoria")
-
-    st.write("### 1. Borrar palabra de texto")
-    palabra_borrar = st.text_input("Escribe la palabra que quieres eliminar:")
-    if st.button("Borrar Palabra"):
-        if ia.borrar_texto(palabra_borrar):
-            st.success(f"¡La palabra '{palabra_borrar}' ha sido olvidada!")
-        else:
-            st.warning("Esa palabra no existe en la memoria.")
-
-    st.write("---")
-    st.write("### 2. Borrar concepto de imagen")
-    imagen_borrar = st.text_input("Escribe la etiqueta de imagen a eliminar:")
-    if st.button("Borrar Imagen"):
-        if ia.borrar_imagen(imagen_borrar):
-            st.success(f"¡El patrón de '{imagen_borrar}' ha sido eliminado!")
-        else:
-            st.warning("Esa etiqueta no existe en la memoria.")
-
-    st.write("---")
-    st.write("### 3. Reiniciar Memoria")
-    if st.button("💣 RESETEAR TODA LA MEMORIA", type="primary"):
-        ia.resetear_memoria_completa()
-        st.error("¡Toda la memoria de la IA ha sido eliminada!")
+                st.error("¡Acción rechazada con castigo!")
